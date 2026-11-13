@@ -1,0 +1,531 @@
+// Zece la Examene — schema for the rebuilt platform.
+// Replaces 5 overlapping legacy MySQL schemas (Courses/CourseAcces/Facturi,
+// cursuri/cursuri_parti/cursuri_acces, Orders/OrderItems/Payments/Invoices)
+// with one model per concept.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------- Enums ----------
+
+enum Role {
+  SUPERADMIN
+  TEACHER_ADMIN
+  CUSTOMER
+}
+
+enum VerificationTokenType {
+  EMAIL_VERIFY
+  PASSWORD_RESET
+}
+
+enum Subject {
+  INFORMATICA
+  MATEMATICA
+  ROMANA
+  ISTORIE
+  BIOLOGIE
+  FIZICA
+}
+
+enum OrderType {
+  COURSE
+  BOOK
+}
+
+enum OrderStatus {
+  PENDING
+  PAID
+  CANCELED
+  FAILED
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+}
+
+enum AccessSource {
+  PURCHASE
+  MIGRATION
+  MANUAL // granted directly by an admin, not tied to an order
+}
+
+enum RuleScope {
+  SUBJECT // applies to every course in a Subject
+  BOOK // applies to one specific book
+}
+
+enum RuleType {
+  PERCENT
+  FIXED
+}
+
+enum DiscountScope {
+  BOOK
+  COURSE
+  ALL
+}
+
+enum SubmissionStatus {
+  NEW
+  IN_PROGRESS
+  DONE
+}
+
+enum LedgerSource {
+  LIVE // created by the real-time order-paid webhook handler
+  BACKFILL // created once by the legacy-data migration, from historical paid orders
+}
+
+// ---------- Identity ----------
+
+model User {
+  id             String       @id @default(cuid())
+  firstName      String
+  lastName       String
+  email          String       @unique
+  passwordHash   String? // null for accounts created via Google sign-in that never set a password
+  googleId       String?      @unique // Google "sub" claim, set once a Google account is linked
+  role           Role         @default(CUSTOMER)
+  emailConfirmed Boolean      @default(false)
+  beneficiary    Beneficiary?
+  billingCountry String?
+  billingCounty  String?
+  billingCity    String?
+  billingStreet  String?
+  legacyId       Int?         @unique // original Users.ID, kept for migration traceability
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  orders             Order[]
+  courseAccess       CourseAccess[]
+  reviews            Review[]
+  verificationTokens VerificationToken[]
+}
+
+// Single-use tokens for the email-verify and password-reset links sent by email.
+model VerificationToken {
+  id        String                @id @default(cuid())
+  userId    String
+  user      User                  @relation(fields: [userId], references: [id])
+  type      VerificationTokenType
+  token     String                @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime              @default(now())
+
+  @@index([userId])
+}
+
+// A person who earns revenue share (Aurelia, Rares, Diana, Romelia, ...).
+// Deliberately separate from User: Romelia has no login yet but still needs
+// her RevenueShareRule + historical LedgerEntry rows to exist from day one.
+model Beneficiary {
+  id           String   @id @default(cuid())
+  name         String
+  userId       String?  @unique
+  user         User?    @relation(fields: [userId], references: [id])
+  // Fallback for sale-notification emails when there's no User account to read an email
+  // from (e.g. Romelia, who has no login yet) — ignored once userId/user is set.
+  contactEmail String?
+  legacyTeamId Int?     @unique // original Team.ID
+  createdAt    DateTime @default(now())
+
+  // When set, ledger totals/sales counts shown in admin only count LedgerEntry rows created
+  // after this date — lets the owner "start counting from zero" without deleting real
+  // historical sales/financial records.
+  ledgerResetAt DateTime?
+
+  rules           RevenueShareRule[]
+  ledgerEntries   LedgerEntry[]
+  authoredCourses Course[]
+  authoredBooks   Book[]
+  payments        BeneficiaryPayment[]
+}
+
+// A real payment made to a beneficiary (bank transfer, cash, etc.), recorded manually by
+// the superadmin. Reduces the beneficiary's outstanding balance (ledger total owed minus
+// payments made) — the balance can go negative if a beneficiary was overpaid/paid in advance.
+model BeneficiaryPayment {
+  id            String      @id @default(cuid())
+  beneficiaryId String
+  beneficiary   Beneficiary @relation(fields: [beneficiaryId], references: [id])
+  amount        Decimal     @db.Decimal(10, 2)
+  note          String?
+  createdByName String?
+  // The real-world date the payment was made — settable at entry time, since a bank
+  // transfer is often logged in the system a few days after it actually happened.
+  // createdAt stays as the record-creation audit timestamp.
+  paidAt        DateTime    @default(now())
+  createdAt     DateTime    @default(now())
+
+  @@index([beneficiaryId])
+}
+
+// ---------- Catalog ----------
+
+model Course {
+  id            String       @id @default(cuid())
+  slug          String       @unique
+  title         String
+  subject       Subject
+  authorId      String?
+  author        Beneficiary? @relation(fields: [authorId], references: [id])
+  description   String? // "Hook" — short marketing summary
+  contentHtml   String?
+  price         Decimal      @db.Decimal(10, 2)
+  salePrice     Decimal?     @db.Decimal(10, 2)
+  currency      String       @default("RON")
+  coverImageUrl String?
+  published     Boolean      @default(false)
+  sortOrder     Int          @default(0)
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  // Overview-tab content, each newline-separated (mirrors the legacy `split_lines` format)
+  nivel         String? // "incepator" | "mediu" | "avansat"
+  audience      String? // "Cui se adresează"
+  courseContent String? // "Ce conține"
+  requirements  String? // "Cerințe"
+  outcomes      String? // "Ce vei obține"
+  bonuses       String? // "Bonusuri"
+
+  // Filename under the app's non-public `resources/` directory holding a downloadable
+  // ZIP of course materials, gated on the buyer having active course access.
+  resourceFileName String?
+
+  parts        CoursePart[]
+  orderItems   OrderItem[]
+  courseAccess CourseAccess[]
+  reviews      Review[]
+
+  // traceability back to whichever legacy table this row came from during migration
+  legacySourceTable String? // "Courses" | "cursuri"
+  legacySourceId    Int?
+
+  @@unique([legacySourceTable, legacySourceId])
+}
+
+model CoursePart {
+  id          String   @id @default(cuid())
+  courseId    String
+  course      Course   @relation(fields: [courseId], references: [id])
+  slug        String?
+  title       String
+  summary     String?
+  sortOrder   Int      @default(0)
+  hours       Int?
+  price       Decimal? @db.Decimal(10, 2)
+  salePrice   Decimal? @db.Decimal(10, 2)
+  isExtension Boolean  @default(false)
+  published   Boolean  @default(true)
+
+  videos     CourseVideo[]
+  orderItems OrderItem[]
+
+  legacyId Int? @unique // cursuri_parti.ID
+
+  @@index([courseId])
+}
+
+model CourseVideo {
+  id            String     @id @default(cuid())
+  coursePartId  String
+  coursePart    CoursePart @relation(fields: [coursePartId], references: [id])
+  title         String
+  vimeoId       String
+  durationSec   Int?
+  sortOrder     Int        @default(0)
+  isFreePreview Boolean    @default(false)
+  published     Boolean    @default(true)
+
+  legacyId Int? @unique // cursuri_videouri.ID
+
+  @@index([coursePartId])
+}
+
+model Review {
+  id         String   @id @default(cuid())
+  courseId   String
+  course     Course   @relation(fields: [courseId], references: [id])
+  userId     String?
+  user       User?    @relation(fields: [userId], references: [id])
+  authorName String // snapshot — survives even if the user row is later removed
+  stars      Int
+  comment    String?
+  approved   Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  legacyId Int? @unique // Reviews.ID
+
+  @@index([courseId])
+}
+
+model Book {
+  id            String      @id @default(cuid())
+  slug          String      @unique
+  title         String
+  subject       Subject
+  authorId      String
+  author        Beneficiary @relation(fields: [authorId], references: [id])
+  description   String?
+  pages         Int?
+  price         Decimal     @db.Decimal(10, 2)
+  coverImageUrl String?
+  sortOrder     Int         @default(0)
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  orderItems        OrderItem[]
+  revenueShareRules RevenueShareRule[]
+  images            BookImage[]
+
+  legacyId Int? @unique // Carti.ID
+
+  @@index([subject])
+}
+
+model BookImage {
+  id        String  @id @default(cuid())
+  bookId    String
+  book      Book    @relation(fields: [bookId], references: [id])
+  url       String
+  isPrimary Boolean @default(false)
+  sortOrder Int     @default(0)
+
+  legacyId Int? @unique // CartiImagini.ID
+
+  @@index([bookId])
+}
+
+// ---------- Commerce ----------
+
+model Order {
+  id            String      @id @default(cuid())
+  userId        String? // null for guest book checkouts (no account required to buy a book)
+  user          User?       @relation(fields: [userId], references: [id])
+  type          OrderType
+  status        OrderStatus @default(PENDING)
+  currency      String      @default("RON")
+  subtotal      Decimal     @db.Decimal(10, 2)
+  discountValue Decimal     @default(0) @db.Decimal(10, 2)
+  shippingCost  Decimal     @default(0) @db.Decimal(10, 2)
+  codFee        Decimal     @default(0) @db.Decimal(10, 2) // ramburs (cash-on-delivery) surcharge
+  total         Decimal     @db.Decimal(10, 2)
+
+  discountCodeId String?
+  discountCode   DiscountCode? @relation(fields: [discountCodeId], references: [id])
+
+  // billing snapshot (for invoice)
+  billingType    String  @default("pf") // "pf" | "company"
+  billingName    String
+  billingEmail   String
+  billingPhone   String?
+  billingAddress String? // street + number
+  billingCity    String?
+  billingCounty  String?
+  billingCui     String? // company CUI if billing as company
+  billingCompany String?
+  billingRegCom  String?
+
+  // shipping snapshot (books only)
+  paymentMethod          String  @default("card") // "card" | "cod"
+  shippingMethod         String? // "courier" | "sameday_easybox"
+  shippingRecipientName  String? // who the AWB is addressed to — may differ from billingName
+  shippingRecipientPhone String?
+  shippingAddress String?
+  shippingCity    String?
+  shippingCounty  String?
+  shippingPostal  String?
+  shippingNotes   String?
+  lockerId        String?
+  lockerName      String?
+  lockerAddress   String?
+  lockerCity      String?
+  lockerCounty    String?
+  lockerPostal    String?
+  lockerOohType   String?
+  lockerLat       Decimal? @db.Decimal(10, 7)
+  lockerLng       Decimal? @db.Decimal(10, 7)
+
+  stripeSessionId       String? @unique
+  stripePaymentIntentId String? @unique
+
+  createdAt DateTime  @default(now())
+  paidAt    DateTime?
+  shippedAt DateTime?
+  updatedAt DateTime  @updatedAt
+
+  items              OrderItem[]
+  payments           Payment[]
+  invoice            Invoice?
+  ledgerEntries      LedgerEntry[]
+  courseAccessGrants CourseAccess[]
+
+  legacySourceTable String? // "Orders" | "Facturi"
+  legacySourceId    Int?
+
+  @@unique([legacySourceTable, legacySourceId])
+  @@index([userId])
+  @@index([status])
+}
+
+model OrderItem {
+  id           String      @id @default(cuid())
+  orderId      String
+  order        Order       @relation(fields: [orderId], references: [id])
+  courseId     String?
+  course       Course?     @relation(fields: [courseId], references: [id])
+  coursePartId String?
+  coursePart   CoursePart? @relation(fields: [coursePartId], references: [id])
+  bookId       String?
+  book         Book?       @relation(fields: [bookId], references: [id])
+  title        String // snapshot, survives catalog edits
+  unitPrice    Decimal     @db.Decimal(10, 2)
+  qty          Int         @default(1)
+  lineTotal    Decimal     @db.Decimal(10, 2)
+
+  ledgerEntries LedgerEntry[]
+
+  @@index([orderId])
+}
+
+model Payment {
+  id         String        @id @default(cuid())
+  orderId    String
+  order      Order         @relation(fields: [orderId], references: [id])
+  provider   String        @default("stripe")
+  amount     Decimal       @db.Decimal(10, 2)
+  currency   String        @default("RON")
+  status     PaymentStatus @default(PENDING)
+  externalId String? // Stripe payment_intent id
+  createdAt  DateTime      @default(now())
+
+  @@index([orderId])
+}
+
+model Invoice {
+  id          String   @id @default(cuid())
+  orderId     String   @unique
+  order       Order    @relation(fields: [orderId], references: [id])
+  series      String   @default("ZLE")
+  number      Int
+  year        Int
+  total       Decimal  @db.Decimal(10, 2)
+  vatRate     Decimal  @default(0) @db.Decimal(5, 2)
+  vatTotal    Decimal  @default(0) @db.Decimal(10, 2)
+  smartbillId String?
+  pdfUrl      String?
+  pdfData     Bytes? // cached PDF bytes from SmartBill, so it can be re-attached/downloaded without re-fetching
+  issueDate   DateTime @default(now())
+  createdAt   DateTime @default(now())
+
+  @@unique([series, year, number])
+}
+
+model DiscountCode {
+  id             String        @id @default(cuid())
+  code           String        @unique
+  percent        Decimal       @db.Decimal(5, 2)
+  scope          DiscountScope @default(ALL)
+  active         Boolean       @default(true)
+  expiresAt      DateTime?
+  maxRedemptions Int?
+  timesRedeemed  Int       @default(0)
+  createdAt      DateTime  @default(now())
+
+  orders Order[]
+}
+
+// ---------- Access ----------
+
+model CourseAccess {
+  id        String       @id @default(cuid())
+  userId    String
+  user      User         @relation(fields: [userId], references: [id])
+  courseId  String
+  course    Course       @relation(fields: [courseId], references: [id])
+  startAt   DateTime     @default(now())
+  expiresAt DateTime?
+  source    AccessSource
+  orderId   String? // present iff source == PURCHASE
+  order     Order?       @relation(fields: [orderId], references: [id])
+  createdAt DateTime     @default(now())
+
+  @@unique([userId, courseId])
+  @@index([courseId])
+}
+
+// ---------- Revenue share ----------
+
+model RevenueShareRule {
+  id            String      @id @default(cuid())
+  beneficiaryId String
+  beneficiary   Beneficiary @relation(fields: [beneficiaryId], references: [id])
+  scope         RuleScope
+  subject       Subject? // set when scope == SUBJECT
+  bookId        String? // set when scope == BOOK
+  book          Book?       @relation(fields: [bookId], references: [id])
+  type          RuleType
+  value         Decimal     @db.Decimal(10, 2) // percent (0-100) or fixed RON amount
+  active        Boolean     @default(true)
+  note          String?
+  createdAt     DateTime    @default(now())
+
+  ledgerEntries LedgerEntry[]
+
+  @@index([beneficiaryId])
+}
+
+model LedgerEntry {
+  id            String            @id @default(cuid())
+  beneficiaryId String
+  beneficiary   Beneficiary       @relation(fields: [beneficiaryId], references: [id])
+  ruleId        String?
+  rule          RevenueShareRule? @relation(fields: [ruleId], references: [id])
+  orderId       String
+  order         Order             @relation(fields: [orderId], references: [id])
+  orderItemId   String?
+  orderItem     OrderItem?        @relation(fields: [orderItemId], references: [id])
+  amount        Decimal           @db.Decimal(10, 2)
+  currency      String            @default("RON")
+  source        LedgerSource
+  createdAt     DateTime          @default(now())
+
+  @@index([beneficiaryId])
+  @@index([orderId])
+}
+
+// ---------- Site forms ----------
+
+model ContactMessage {
+  id        String           @id @default(cuid())
+  name      String
+  email     String
+  phone     String? // collected so the team can follow up faster on WhatsApp
+  message   String
+  status    SubmissionStatus @default(NEW)
+  createdAt DateTime         @default(now())
+}
+
+model ReturnRequest {
+  id             String           @id @default(cuid())
+  name           String
+  email          String
+  phone          String
+  orderReference String
+  product        String
+  orderDate      String?
+  iban           String?
+  reason         String?
+  status         SubmissionStatus @default(NEW)
+  createdAt      DateTime         @default(now())
+}

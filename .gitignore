@@ -1,0 +1,78 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env files — .env.example / .env.production.example are templates with no real secrets
+# and ARE committed; every other .env* file is local/production-only and never committed.
+.env*
+!.env*.example
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+/src/generated/prisma
+
+# course resource zips — too large to commit (~250MB); uploaded manually to the VPS,
+# see DEPLOYMENT.md
+/resources/*.zip
+
+# admin-uploaded book images — runtime content, persisted via a Docker volume in
+# production (see docker-compose.prod.yml), not committed to git
+/public/uploads/
+
+# legacy MySQL dump(s) — real customer PII (names, emails, phones, addresses), used only
+# as a local source for the one-time migration script, never committed to git
+/*.sql
+/u247165379_zle*.sql
+
+# Private operational data and local assistant context
+/.agents/
+/.claude/
+/.windsurf/
+/CLAUDE.md
+/skills-lock.json
+/scripts/
+/resources/*
+!/resources/.gitkeep
+*.sql
+!/prisma/migrations/**/migration.sql
+*.dump
+*.backup
+*.log
+*.key
+*.p12
+*.pfx
+*.db
+*.sqlite*

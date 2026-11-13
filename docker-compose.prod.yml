@@ -1,0 +1,88 @@
+# Production stack for the VPS: Postgres (internal-only), the Next.js app, a one-off
+# migration job, and Caddy for automatic HTTPS. Local development uses docker-compose.yml
+# instead (just Postgres, exposed on the host for `npm run dev`).
+#
+# POSTGRES_PASSWORD must be set in .env.production and match the password embedded in
+# that same file's DATABASE_URL — they're the same credential, kept in one place on purpose
+# so there's nowhere for the two to drift out of sync.
+#
+# IMPORTANT: this file uses its own `name:` (below) so its volumes never collide with
+# docker-compose.yml's — both live in this directory and Compose derives volume names from
+# the project name by default, so without this they'd silently share one Postgres volume.
+#
+# Usage on the VPS:
+#   docker compose --env-file .env.production -f docker-compose.prod.yml run --build --rm migrate   # apply schema, every deploy
+#   docker compose --env-file .env.production -f docker-compose.prod.yml up -d --build               # start postgres, app, caddy
+#
+# --build on `migrate` is required, not optional — without it Compose silently reuses
+# whatever image it last built for that service, applying a stale migration set.
+#
+# --env-file .env.production is required too, not just env_file: below — env_file: only
+# injects vars into the container at runtime, too late for NEXT_PUBLIC_* vars, which
+# `next build` inlines into the client bundle. --env-file makes Compose substitute
+# ${NEXT_PUBLIC_RECAPTCHA_SITE_KEY} in the build args above from the same file.
+
+name: zle-prod
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    environment:
+      POSTGRES_USER: zle
+      POSTGRES_DB: zle
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    # No `ports:` — only reachable from other containers on this compose network, not the host.
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: builder
+      args:
+        NEXT_PUBLIC_RECAPTCHA_SITE_KEY: ${NEXT_PUBLIC_RECAPTCHA_SITE_KEY}
+    env_file:
+      - .env.production
+    depends_on:
+      - postgres
+    command: ["npx", "prisma", "migrate", "deploy"]
+    profiles: ["tools"] # only runs when explicitly invoked with `run --rm migrate`
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_RECAPTCHA_SITE_KEY: ${NEXT_PUBLIC_RECAPTCHA_SITE_KEY}
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    env_file:
+      - .env.production
+    expose:
+      - "3000"
+    volumes:
+      # admin-uploaded book images — must survive image rebuilds/redeploys
+      - app_uploads:/app/public/uploads
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - app
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  postgres_data:
+  caddy_data:
+  caddy_config:
+  app_uploads:

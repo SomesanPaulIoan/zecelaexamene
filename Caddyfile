@@ -1,0 +1,5 @@
+# Replace with the real domain before deploying. Caddy handles TLS certificates
+# automatically (Let's Encrypt) as long as the domain's DNS already points at this VPS.
+zecelaexamene.ro, www.zecelaexamene.ro {
+	reverse_proxy app:3000
+}
